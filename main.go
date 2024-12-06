@@ -12,7 +12,9 @@ func main() {
 	var example = "example-models"
 	rootModel := readModelDir(example)
 	log.Default().Printf("Root model: %v", rootModel)
-	prepareExecutionPlan(rootModel)
+	ep := prepareExecutionPlan(rootModel)
+	log.Default().Printf("Execution plan: %v", ep)
+
 }
 
 type model struct {
@@ -52,9 +54,9 @@ func readModelDir(dirPath string) model {
 }
 
 type step struct {
-	id      int
-	file    string
-	parents []string
+	file       string
+	sql        string
+	parentFile []string
 }
 type executionPlan struct {
 	model model
@@ -76,11 +78,9 @@ var placeholderRegexp = regexp.MustCompile(`{{([\s]*)([a-z]+)\((.*)\)([\s]*)}}`)
 
 func prepareExecutionPlan(model model) executionPlan {
 	files := model.files()
-	executionPlan := executionPlan{
-		model: model,
-		steps: make([]step, len(files)),
-	}
+
 	dependencies := make(map[string][]string)
+	fileContents := make(map[string]string)
 	log.Default().Printf("files %v", files)
 	for _, file := range files {
 		contentBytes, _ := os.ReadFile(file)
@@ -93,12 +93,57 @@ func prepareExecutionPlan(model model) executionPlan {
 			replace, dependencyList := findReplacements(placeholder)
 			content = strings.Replace(content, placeholder, replace, 1)
 			dependencies[file] = dependencyList
+			fileContents[file] = content
 		}
 
 		log.Default().Printf("-----file after %s ------\n%s\n----------", file, content)
 	}
 
-	return executionPlan
+	return executionPlan{
+		model: model,
+		steps: findSteps(dependencies, fileContents),
+	}
+}
+
+func allDependenciesProcessed(dependencies []string, processed map[string]bool, known map[string]bool) bool {
+	completed := true
+	for _, dependency := range dependencies {
+		_, isDone := processed[dependency]
+		_, isKnown := known[dependency]
+		completed = completed && (isDone || !isKnown)
+	}
+	return completed
+}
+
+func findSteps(dependencies map[string][]string, contents map[string]string) []step {
+	knownFiles := map[string]bool{}
+	for _, file := range contents {
+		knownFiles[file] = true
+	}
+
+	steps := make([]step, 0)
+	processedFiles := map[string]bool{}
+
+	for len(processedFiles) < len(dependencies) {
+		for file, depDependencies := range dependencies {
+			_, solved := processedFiles[file]
+			if solved {
+				continue
+			}
+
+			if allDependenciesProcessed(depDependencies, processedFiles, knownFiles) {
+				processedFiles[file] = true
+				parentFiles := make([]string, len(depDependencies))
+				copy(parentFiles, depDependencies)
+				steps = append(steps, step{
+					file:       file,
+					sql:        contents[file],
+					parentFile: parentFiles,
+				})
+			}
+		}
+	}
+	return steps
 }
 
 func findReplacements(placeholder string) (string, []string) {
